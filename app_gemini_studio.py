@@ -126,20 +126,17 @@ def generer_audio_gemini_tts(chunk_texte: str, persona: str, api_key: str) -> by
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3.1-flash-tts-preview')
     
-    # Prompt de direction narrative pour le modèle TTS
     prompt_narratif = f"Génère la narration vocale de ce texte en adoptant le style '{persona}' :\n\n{chunk_texte}"
     
-    # Appel de l'API avec configuration pour forcer le retour audio
     response = model.generate_content(
         prompt_narratif,
         generation_config={"response_mime_type": "audio/mp3"}
     )
     
-    # Extraction des données binaires audio depuis la réponse
     try:
         return response.parts[0].inline_data.data
     except Exception:
-        raise ValueError("Le format de réponse audio de l'API Preview a été modifié ou est inaccessible.")
+        raise ValueError(f"Le format de réponse audio de l'API Preview a échoué. Réponse brute : {response}")
 
 # ==============================================================================
 # INTERFACE PRINCIPALE
@@ -223,7 +220,7 @@ def main():
                         elif "401" in erreur_str or "403" in erreur_str:
                             diagnostic = "Clé invalide/révoquée (401/403)"
                         else:
-                            diagnostic = f"Erreur de service"
+                            diagnostic = f"Erreur de service : {str(e)}"
 
                         if index_cle + 1 < len(pool_cles):
                             st.warning(f"⚠️ Traduction : Bascule sur la Clé #{index_cle + 2} ({diagnostic})...")
@@ -264,7 +261,6 @@ def main():
                     st.error("🚨 Aucune clé API Google valide trouvée pour le TTS.")
                     return
 
-                # Le modèle TTS préfère généralement des morceaux plus courts pour maîtriser la latence
                 texte_final_audio = nettoyer_texte_pour_audio(st.session_state.texte_pret_pour_audio)
                 chunks_pour_audio = decouper_texte_en_chunks(texte_final_audio, taille_chunk=3000) 
                 
@@ -281,23 +277,28 @@ def main():
                         audio_part = generer_audio_gemini_tts(chunks_pour_audio[j], voix_technique, pool_cles[index_cle_audio])
                         audio_bytes_total += audio_part
                         j += 1
-                        time.sleep(1.5) # Pause de courtoisie pour l'API
+                        time.sleep(1.5)
+                        
                     except Exception as e_audio:
-                        erreur_str = str(e_audio).lower()
+                        # LA MODIFICATION EST ICI : Capture de l'erreur brute sans filtre
+                        erreur_brute = str(e_audio)
+                        erreur_str = erreur_brute.lower()
+                        
                         if "429" in erreur_str or "quota" in erreur_str:
                             diagnostic = "Quota atteint (429)"
                         elif "401" in erreur_str or "403" in erreur_str:
                             diagnostic = "Clé invalide/révoquée (401/403)"
                         else:
-                            diagnostic = f"Erreur de service audio"
+                            # Affichage du vrai message technique de Google
+                            diagnostic = f"Erreur technique : {erreur_brute}"
 
                         if index_cle_audio + 1 < len(pool_cles):
                             st.warning(f"⚠️ Audio : Bascule sur la Clé #{index_cle_audio + 2} ({diagnostic})...")
                             index_cle_audio += 1
                             time.sleep(2)
                         else:
-                            st.error("🚨 Enregistrement arrêté : Toutes les clés ont été consommées. L'audio partiel est disponible ci-dessous.")
-                            break # On sort de la boucle pour livrer l'audio partiel au lieu de crasher
+                            st.error(f"🚨 Enregistrement arrêté. Dernière erreur : {diagnostic}")
+                            break
 
                 if audio_bytes_total:
                     st.success("🎉 Piste vocale Gemini assemblée avec succès !")
