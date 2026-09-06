@@ -3,7 +3,6 @@ import fitz  # PyMuPDF
 import io
 import re
 import time
-import base64
 import google.generativeai as genai
 
 # ==============================================================================
@@ -23,9 +22,6 @@ VOIX_GEMINI_TTS = {
     "Voix Off Premium (The Ad Voiceover)": "The Ad Voiceover"
 }
 
-# ==============================================================================
-# GESTION DE LA MÉMOIRE (SESSION STATE)
-# ==============================================================================
 def reinitialiser_memoire():
     st.session_state.texte_pret_pour_audio = None
 
@@ -66,6 +62,7 @@ def nettoyer_texte_source(texte: str) -> str:
 
 def nettoyer_texte_pour_audio(texte: str) -> str:
     if not texte: return ""
+    # Correction de l'horloge pour le TTS
     texte = re.sub(r'(\d+):(\d+)', r'\1, \2', texte)
     texte = texte.replace("*", "")
     texte = re.sub(r'^#+\s*', '', texte, flags=re.MULTILINE)
@@ -123,28 +120,29 @@ def traduire_chunk_gemini(chunk: str, api_key: str) -> str:
     return response.text.strip()
 
 def generer_audio_gemini_tts(chunk_texte: str, persona: str, api_key: str) -> bytes:
-    """Utilisation du modèle expérimental TTS Preview pour générer la narration sans filtre MIME strict."""
+    """Utilisation du modèle expérimental TTS avec la modalité AUDIO explicite."""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3.1-flash-tts-preview')
     
-    prompt_narratif = f"Génère la narration vocale de ce texte en adoptant le style '{persona}' :\n\n{chunk_texte}"
+    # Format exigé par le nouveau modèle pour une narration précise
+    prompt_narratif = f"Director's notes: Narration style is {persona}.\n\nTranscript:\n{chunk_texte}"
     
-    # On retire le paramètre 'response_mime_type' pour ne pas bloquer le SDK Python
-    response = model.generate_content(prompt_narratif)
+    # LE SECRET : Déclarer la modalité AUDIO (sinon le modèle refuse de répondre via Erreur 400)
+    response = model.generate_content(
+        prompt_narratif,
+        generation_config={
+            "response_modalities": ["AUDIO"]
+        }
+    )
     
     try:
-        # Cas 1 : L'audio est encapsulé sous forme de données binaires inline
-        if response.parts and hasattr(response.parts[0], 'inline_data') and response.parts[0].inline_data:
-            return response.parts[0].inline_data.data
-        # Cas 2 : L'API retourne l'audio encodé en Base64 dans le texte
-        else:
-            texte_retour = response.text.strip()
-            # Nettoyage si le modèle renvoie du texte autour du code Base64
-            if "```" in texte_retour:
-                texte_retour = texte_retour.split("```")[1].replace("json", "").replace("base64", "").strip()
-            return base64.b64decode(texte_retour)
+        # Extraction du bloc audio binaire de la réponse
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'inline_data') and part.inline_data:
+                return part.inline_data.data
+        return response.parts[0].inline_data.data
     except Exception as e:
-        raise ValueError(f"Extraction audio impossible. Détails: {str(e)} | Extrait réponse: {str(response)[:200]}")
+        raise ValueError(f"Extraction audio impossible. Détails: {str(e)}")
 
 # ==============================================================================
 # INTERFACE PRINCIPALE
@@ -197,9 +195,6 @@ def main():
 
         st.success(f"✅ Extraction réussie ! ({len(texte_propre)} caractères détectés)")
 
-        # ======================================================================
-        # BRANCHE A : TRADUCTION (POOL DE CLÉS)
-        # ======================================================================
         if mode_choisi == "🇬🇧 Document en Anglais" and st.session_state.texte_pret_pour_audio is None:
             st.subheader("Étape 2 : Traduction en Français")
             if st.button("🚀 Lancer la Traduction IA", type="primary"):
@@ -246,9 +241,6 @@ def main():
         elif mode_choisi == "🇫🇷 Document en Français":
             st.session_state.texte_pret_pour_audio = nettoyer_texte_pour_audio(texte_propre)
 
-        # ======================================================================
-        # ÉTAPE FINALE : NARRATION VOCALE GEMINI TTS (POOL DE CLÉS)
-        # ======================================================================
         if st.session_state.texte_pret_pour_audio is not None:
             st.divider()
             st.subheader("Étape Finale : Studio d'Enregistrement IA 🎙️")
@@ -270,7 +262,9 @@ def main():
                     return
 
                 texte_final_audio = nettoyer_texte_pour_audio(st.session_state.texte_pret_pour_audio)
-                chunks_pour_audio = decouper_texte_en_chunks(texte_final_audio, taille_chunk=3000) 
+                
+                # RÉDUCTION DES MORCEAUX POUR LE TTS : Les modèles vocaux préfèrent les petits blocs (1500 caractères env.)
+                chunks_pour_audio = decouper_texte_en_chunks(texte_final_audio, taille_chunk=1500) 
                 
                 audio_bytes_total = b""
                 barre_progression_audio = st.progress(0, text="Chauffage du micro de Gemini 3.1 Flash TTS...")
@@ -299,7 +293,7 @@ def main():
                             diagnostic = f"Erreur technique : {erreur_brute}"
 
                         if index_cle_audio + 1 < len(pool_cles):
-                            st.warning(f"⚠️ Audio : Bascule sur la Clé #{index_cle_audio + 2} ({diagnostic})...")
+                            st.warning(f"⚠️ Audio : Bascule sur la Clé #{index_cle_audio + 2} ({diagnostic[:100]}...).")
                             index_cle_audio += 1
                             time.sleep(2)
                         else:
