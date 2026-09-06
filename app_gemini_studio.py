@@ -3,6 +3,7 @@ import fitz  # PyMuPDF
 import io
 import re
 import time
+import base64
 import google.generativeai as genai
 
 # ==============================================================================
@@ -122,21 +123,28 @@ def traduire_chunk_gemini(chunk: str, api_key: str) -> str:
     return response.text.strip()
 
 def generer_audio_gemini_tts(chunk_texte: str, persona: str, api_key: str) -> bytes:
-    """Utilisation du modèle expérimental TTS Preview pour générer la narration."""
+    """Utilisation du modèle expérimental TTS Preview pour générer la narration sans filtre MIME strict."""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3.1-flash-tts-preview')
     
     prompt_narratif = f"Génère la narration vocale de ce texte en adoptant le style '{persona}' :\n\n{chunk_texte}"
     
-    response = model.generate_content(
-        prompt_narratif,
-        generation_config={"response_mime_type": "audio/mp3"}
-    )
+    # On retire le paramètre 'response_mime_type' pour ne pas bloquer le SDK Python
+    response = model.generate_content(prompt_narratif)
     
     try:
-        return response.parts[0].inline_data.data
-    except Exception:
-        raise ValueError(f"Le format de réponse audio de l'API Preview a échoué. Réponse brute : {response}")
+        # Cas 1 : L'audio est encapsulé sous forme de données binaires inline
+        if response.parts and hasattr(response.parts[0], 'inline_data') and response.parts[0].inline_data:
+            return response.parts[0].inline_data.data
+        # Cas 2 : L'API retourne l'audio encodé en Base64 dans le texte
+        else:
+            texte_retour = response.text.strip()
+            # Nettoyage si le modèle renvoie du texte autour du code Base64
+            if "```" in texte_retour:
+                texte_retour = texte_retour.split("```")[1].replace("json", "").replace("base64", "").strip()
+            return base64.b64decode(texte_retour)
+    except Exception as e:
+        raise ValueError(f"Extraction audio impossible. Détails: {str(e)} | Extrait réponse: {str(response)[:200]}")
 
 # ==============================================================================
 # INTERFACE PRINCIPALE
@@ -280,7 +288,6 @@ def main():
                         time.sleep(1.5)
                         
                     except Exception as e_audio:
-                        # LA MODIFICATION EST ICI : Capture de l'erreur brute sans filtre
                         erreur_brute = str(e_audio)
                         erreur_str = erreur_brute.lower()
                         
@@ -289,7 +296,6 @@ def main():
                         elif "401" in erreur_str or "403" in erreur_str:
                             diagnostic = "Clé invalide/révoquée (401/403)"
                         else:
-                            # Affichage du vrai message technique de Google
                             diagnostic = f"Erreur technique : {erreur_brute}"
 
                         if index_cle_audio + 1 < len(pool_cles):
